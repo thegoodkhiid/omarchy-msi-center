@@ -8,8 +8,8 @@ import "Model.js" as Model
 
 Panel {
   id: root
-  moduleName: "tumi.msi-center"
-  ipcTarget: "tumi.msi-center"
+  moduleName: "oma.msi-center"
+  ipcTarget: "oma.msi-center"
   manageIpc: false
 
   Commons.Translations {
@@ -215,8 +215,8 @@ Panel {
     target: ""
 
     Component.onCompleted: {
-      if (IpcRegistry.handlerFor("tumi.msi-center") === null) {
-        ipcHandler.target = "tumi.msi-center"
+      if (IpcRegistry.handlerFor("oma.msi-center") === null) {
+        ipcHandler.target = "oma.msi-center"
         ipcHandler.enabled = true
         IpcRegistry.register(ipcHandler)
       }

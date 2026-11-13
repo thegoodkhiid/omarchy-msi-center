@@ -1,5 +1,5 @@
 #!/bin/bash
-# msi-center-ctl — Hardware & telemetry controller for tumi.msi-center Omarchy plugin.
+# msi-center-ctl — Hardware & telemetry controller for oma.msi-center Omarchy plugin.
 # Supports MSI laptops & desktops across Intel & AMD platforms via sysfs,
 # msi_wmi_platform, msi-ec, validated ec_sys (MSI EMS register map),
 # powerprofilesctl, nvidia-smi / amdgpu sysfs, and MysticLight USB HID / sysfs LEDs.
@@ -186,7 +186,12 @@ EOF
 
     if [[ "$target_user" =~ ^[a-z_][a-z0-9_-]*$ && "$target_user" != "root" ]]; then
       local sudoers_file="/etc/sudoers.d/omarchy-msi-center"
+      local uhome
+      uhome=$(getent passwd "$target_user" | cut -d: -f6)
       printf '%s ALL=(root) NOPASSWD: %s\n' "$target_user" "$SCRIPT_PATH" > "$sudoers_file"
+      if [[ -n "$uhome" && "$SCRIPT_PATH" != "$uhome/.config/omarchy/plugins/oma.msi-center/bin/msi-center-ctl" ]]; then
+        printf '%s ALL=(root) NOPASSWD: %s/.config/omarchy/plugins/oma.msi-center/bin/msi-center-ctl\n' "$target_user" "$uhome" >> "$sudoers_file"
+      fi
       chmod 440 "$sudoers_file"
       if ! visudo -cf "$sudoers_file" >/dev/null 2>&1; then
         rm -f "$sudoers_file"

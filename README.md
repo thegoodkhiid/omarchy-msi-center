@@ -1,4 +1,4 @@
-# MSI Center (`tumi.msi-center`)
+# MSI Center (`oma.msi-center`)
 
 **MSI Center** is a native [Omarchy](https://omarchy.org/) status-bar plugin that brings complete hardware control, thermal telemetry, **User Scenarios**, **Cooler Boost**, **Mystic Light RGB**, and **Battery Master** charge limits to MSI laptops and desktops on Arch Linux.
 
@@ -13,7 +13,7 @@ omarchy plugin add https://github.com/thegoodkhiid/omarchy-msi-center.git --enab
 Update anytime with:
 
 ```bash
-omarchy plugin update tumi.msi-center
+omarchy plugin update oma.msi-center
 ```
 
 ---
@@ -82,23 +82,23 @@ You can also bind Hyprland shortcuts or trigger actions from the terminal via `o
 
 ```bash
 # Toggle the MSI Center popup panel
-omarchy-shell tumi.msi-center toggle
+omarchy-shell oma.msi-center toggle
 
 # Toggle Cooler Boost max-fan mode directly
-omarchy-shell tumi.msi-center coolerBoost
+omarchy-shell oma.msi-center coolerBoost
 
 # Toggle the status-bar temperature readout
-omarchy-shell tumi.msi-center toggleBarTemp
+omarchy-shell oma.msi-center toggleBarTemp
 ```
 
 Or use the bundled `msi-center-ctl` CLI directly:
 
 ```bash
-~/.config/omarchy/plugins/tumi.msi-center/bin/msi-center-ctl status
-~/.config/omarchy/plugins/tumi.msi-center/bin/msi-center-ctl scenario extreme
-~/.config/omarchy/plugins/tumi.msi-center/bin/msi-center-ctl cooler-boost toggle
-~/.config/omarchy/plugins/tumi.msi-center/bin/msi-center-ctl mystic wave "#00E5FF" 100 65
-~/.config/omarchy/plugins/tumi.msi-center/bin/msi-center-ctl battery-limit 80
+~/.config/omarchy/plugins/oma.msi-center/bin/msi-center-ctl status
+~/.config/omarchy/plugins/oma.msi-center/bin/msi-center-ctl scenario extreme
+~/.config/omarchy/plugins/oma.msi-center/bin/msi-center-ctl cooler-boost toggle
+~/.config/omarchy/plugins/oma.msi-center/bin/msi-center-ctl mystic wave "#00E5FF" 100 65
+~/.config/omarchy/plugins/oma.msi-center/bin/msi-center-ctl battery-limit 80
 ```
 
 ---
@@ -118,10 +118,10 @@ Or use the bundled `msi-center-ctl` CLI directly:
 
 ```bash
 # Validate Omarchy plugin manifest & structure
-omarchy plugin validate ~/.config/omarchy/plugins/tumi.msi-center
+omarchy plugin validate ~/.config/omarchy/plugins/oma.msi-center
 
 # Run state sanitization & markup-neutralization regression tests
-node ~/.config/omarchy/plugins/tumi.msi-center/tests/model-test.js
+node ~/.config/omarchy/plugins/oma.msi-center/tests/model-test.js
 ```
 
 ---

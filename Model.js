@@ -1,5 +1,5 @@
 // Pure data-normalization, markup-neutralization, and state helpers for
-// tumi.msi-center. Shared by Panel.qml and regression tests in tests/model-test.js.
+// oma.msi-center. Shared by Panel.qml and regression tests in tests/model-test.js.
 
 function neutralizeMarkup(value, maxLen) {
   var limit = (typeof maxLen === "number" && maxLen > 0) ? maxLen : 160

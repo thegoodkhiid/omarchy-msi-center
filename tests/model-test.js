@@ -1,4 +1,4 @@
-// Regression test suite for tumi.msi-center Model.js
+// Regression test suite for oma.msi-center Model.js
 // Covers markup neutralization, payload bounding/validation, and tooltip/hero sinks.
 
 const assert = require("assert")
@@ -70,4 +70,4 @@ assert.strictEqual(state.mystic.brightnessPct, 100, "brightness must clamp to 10
 assert.strictEqual(state.mystic.speedPct, 0, "speed must clamp to >= 0")
 assert(!state.drivers.nvidiaDetail.includes("<"), "driver detail must neutralize markup")
 
-console.log("All tumi.msi-center Model regression tests passed.")
+console.log("All oma.msi-center Model regression tests passed.")
