@@ -106,7 +106,7 @@ Or use the bundled `msi-center-ctl` CLI directly:
 ## Hardware Compatibility & Safety
 
 - **Supported Systems**:
-  - MSI Gaming & Creator Laptops (Sword, Katana, Pulse, Crosshair, Vector, Raider, Stealth, Titan, Cyborg, Prestige, Modern — Intel & AMD Ryzen).
+  - MSI Gaming & Creator Laptops (Katana, Sword, Pulse, Crosshair, Vector, Raider, Stealth, Titan, Cyborg, Prestige, Modern — Intel & AMD Ryzen).
   - MSI Desktops (telemetry, fan monitoring, power scenarios, and Mystic Light USB HID).
 - **Safe EC Register Validation**:
   - Uses `/sys/devices/platform/msi-ec` whenever supported by the running kernel.
