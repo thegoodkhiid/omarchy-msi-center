@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "tumi.msi-center",
+  "name": "MSI Center",
+  "version": "1.0.0",
+  "author": "tumi",
+  "license": "MIT",
+  "description": "Control center for MSI laptops and desktops: User Scenarios, Cooler Boost, Fan RPMs, NVIDIA GPU & CPU telemetry, Mystic Light RGB, Battery Master charge limits, hardware switches, and driver diagnostics.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "MSI Center",
+    "description": "MSI Center hardware controls, scenarios, Cooler Boost, Mystic Light, and driver health",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
