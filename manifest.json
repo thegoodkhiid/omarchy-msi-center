@@ -3,9 +3,11 @@
   "id": "tumi.msi-center",
   "name": "MSI Center",
   "version": "1.0.0",
-  "author": "tumi",
+  "author": "thegoodkhiid",
   "license": "MIT",
-  "description": "Control center for MSI laptops and desktops: User Scenarios, Cooler Boost, Fan RPMs, NVIDIA GPU & CPU telemetry, Mystic Light RGB, Battery Master charge limits, hardware switches, and driver diagnostics.",
+  "homepage": "https://github.com/thegoodkhiid/omarchy-msi-center",
+  "repository": "https://github.com/thegoodkhiid/omarchy-msi-center",
+  "description": "Control center for MSI laptops and desktops: User Scenarios, Cooler Boost, Fan RPMs, NVIDIA/AMD GPU & CPU telemetry, Mystic Light RGB, Battery Master charge limits, hardware switches, and driver diagnostics.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,9 +16,31 @@
   },
   "barWidget": {
     "displayName": "MSI Center",
-    "description": "MSI Center hardware controls, scenarios, Cooler Boost, Mystic Light, and driver health",
+    "description": "MSI Center hardware controls, scenarios, Cooler Boost, Mystic Light RGB, and driver health.",
     "category": "System",
+    "aliases": [
+      "msi",
+      "msi center",
+      "mystic light",
+      "cooler boost",
+      "dragon center",
+      "fan",
+      "rgb",
+      "battery limit"
+    ],
     "allowMultiple": false,
-    "defaultSection": "right"
+    "defaultSection": "right",
+    "defaults": {
+      "showBarTemp": false
+    },
+    "schema": [
+      {
+        "key": "showBarTemp",
+        "type": "boolean",
+        "label": "Show CPU temperature in bar",
+        "description": "Display live CPU temperature next to the MSI Center icon in the status bar.",
+        "defaultValue": false
+      }
+    ]
   }
 }
