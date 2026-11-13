@@ -4,16 +4,41 @@
 
 ---
 
-## Quick Install
+## Quick Install, Update & Removal
+
+### Install
 
 ```bash
 omarchy plugin add https://github.com/thegoodkhiid/omarchy-msi-center.git --enable
 ```
 
-Update anytime with:
+### Update
 
 ```bash
 omarchy plugin update oma.msi-center
+```
+
+### Disable or Uninstall
+
+Temporarily hide it from the status bar without uninstalling:
+
+```bash
+omarchy plugin disable oma.msi-center
+```
+
+Completely remove the plugin:
+
+```bash
+omarchy plugin remove oma.msi-center
+```
+
+*(Optional)* If you used the **Unlock Direct EC & RGB Control** button and want to remove the system udev/module/sudoers rules as well:
+
+```bash
+sudo rm -f /etc/sudoers.d/omarchy-msi-center \
+           /etc/udev/rules.d/60-msi-mysticlight.rules \
+           /etc/modules-load.d/msi-center.conf \
+           /etc/modprobe.d/msi-center.conf
 ```
 
 ---
