@@ -9,15 +9,17 @@ set -uo pipefail
 SCRIPT_PATH="$(realpath "$0")"
 USER_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/msi-center"
 SYS_STATE_DIR="/var/lib/msi-center"
-BOOT_INIT_FLAG="/run/msi-center-boot-init.done"
 MSI_EC_DIR="/sys/devices/platform/msi-ec"
 EC_IO="/sys/kernel/debug/ec/ec0/io"
+ANIM_PID_FILE="$USER_STATE_DIR/mystic-anim.pid"
 
 mkdir -p "$USER_STATE_DIR" 2>/dev/null || true
 
 STATE_FILE="$USER_STATE_DIR/state.json"
-if [[ -f "$SYS_STATE_DIR/state.json" && ( ! -f "$STATE_FILE" || "$SYS_STATE_DIR/state.json" -nt "$STATE_FILE" ) ]]; then
-  STATE_FILE="$SYS_STATE_DIR/state.json"
+if [[ -f "$SYS_STATE_DIR/state.json" ]]; then
+  if [[ ! -f "$STATE_FILE" || "$SYS_STATE_DIR/state.json" -nt "$STATE_FILE" ]]; then
+    STATE_FILE="$SYS_STATE_DIR/state.json"
+  fi
 fi
 
 read_state_key() {
@@ -36,8 +38,12 @@ read_state_key() {
 write_state_kv() {
   local key="$1" val="$2"
   local current="{}"
-  [[ -f "$STATE_FILE" ]] && current=$(cat "$STATE_FILE" 2>/dev/null || echo "{}")
-  echo "$current" | jq -e . >/dev/null 2>&1 || current="{}"
+  if [[ -f "$STATE_FILE" ]]; then
+    current=$(cat "$STATE_FILE" 2>/dev/null || echo "{}")
+  fi
+  if ! echo "$current" | jq -e . >/dev/null 2>&1; then
+    current="{}"
+  fi
   local updated
   updated=$(echo "$current" | jq --arg k "$key" --arg v "$val" '.[$k] = $v')
   mkdir -p "$USER_STATE_DIR" 2>/dev/null || true
@@ -47,7 +53,7 @@ write_state_kv() {
     chmod 755 "$SYS_STATE_DIR" 2>/dev/null || true
     printf '%s\n' "$updated" > "$SYS_STATE_DIR/state.json" 2>/dev/null || true
     chmod 644 "$SYS_STATE_DIR/state.json" 2>/dev/null || true
-    local target_uid="${PKEXEC_UID:-${SUDO_UID:-}}"
+    local target_uid="${PKEXEC_UID:-}"
     if [[ -z "$target_uid" ]]; then
       target_uid=$(stat -c '%u' "$SCRIPT_PATH" 2>/dev/null || echo "")
     fi
@@ -63,26 +69,11 @@ write_state_kv() {
   fi
 }
 
-can_sudo_nopasswd() {
-  [[ $EUID -eq 0 ]] && return 0
-  sudo -n "$SCRIPT_PATH" --check-root >/dev/null 2>&1 && return 0
-  sudo -n true >/dev/null 2>&1 && return 0
-  return 1
-}
-
-elevate_if_possible() {
-  if [[ $EUID -eq 0 ]]; then
-    return 0
-  fi
-  if sudo -n "$SCRIPT_PATH" "$@" 2>/dev/null; then
-    exit 0
-  fi
-  return 1
-}
-
 find_mystic_hidraw() {
   for h in /sys/class/hidraw/hidraw*; do
-    [[ -e "$h/device/uevent" ]] || continue
+    if [[ ! -e "$h/device/uevent" ]]; then
+      continue
+    fi
     if grep -qiE "00001462:0000(1603|1562|1563|1564)" "$h/device/uevent" 2>/dev/null; then
       echo "/dev/$(basename "$h")"
       return 0
@@ -92,7 +83,12 @@ find_mystic_hidraw() {
 }
 
 ensure_ec_sys() {
-  [[ $EUID -eq 0 ]] || return 1
+  if [[ -w "$EC_IO" ]]; then
+    return 0
+  fi
+  if [[ $EUID -ne 0 ]]; then
+    return 1
+  fi
   if [[ ! -e "$EC_IO" ]]; then
     modprobe ec_sys write_support=1 2>/dev/null || true
   fi
@@ -106,7 +102,7 @@ ensure_ec_sys() {
   fi
   if [[ -e "$EC_IO" ]]; then
     chmod 755 /sys/kernel/debug /sys/kernel/debug/ec /sys/kernel/debug/ec/ec0 2>/dev/null || true
-    chmod 644 "$EC_IO" 2>/dev/null || true
+    chmod 666 "$EC_IO" 2>/dev/null || true
     return 0
   fi
   return 1
@@ -116,12 +112,16 @@ ensure_ec_sys() {
 # firmware string at 0xA0..0xAB (e.g. "17T2EMS1.110") before writing raw EC bytes.
 is_msi_laptop_ec() {
   local chassis_type=10
-  [[ -r /sys/devices/virtual/dmi/id/chassis_type ]] && chassis_type=$(cat /sys/devices/virtual/dmi/id/chassis_type 2>/dev/null || echo 10)
+  if [[ -r /sys/devices/virtual/dmi/id/chassis_type ]]; then
+    chassis_type=$(cat /sys/devices/virtual/dmi/id/chassis_type 2>/dev/null || echo 10)
+  fi
   case "$chassis_type" in
     8|9|10|11|14|30|31|32) ;;
     *) return 1 ;;
   esac
-  [[ -r "$EC_IO" ]] || ensure_ec_sys || return 1
+  if [[ ! -r "$EC_IO" ]]; then
+    ensure_ec_sys || return 1
+  fi
   python3 - "$EC_IO" <<'PY' 2>/dev/null
 import re, sys
 with open(sys.argv[1], "rb") as f:
@@ -152,10 +152,12 @@ PY
   fi
 }
 
-# Automatically provision udev + sudoers + ec_sys whenever executed as root
-# (e.g. via pkexec on first action) so subsequent actions never prompt again.
+# Automatically provision udev + systemd-tmpfiles + ec_sys whenever executed as root
+# (via pkexec on first action) so subsequent actions run directly as the user.
 ensure_permissions_bootstrap() {
-  [[ $EUID -eq 0 ]] || return 0
+  if [[ $EUID -ne 0 ]]; then
+    return 0
+  fi
   ensure_ec_sys || true
 
   local hiddev
@@ -164,41 +166,57 @@ ensure_permissions_bootstrap() {
     chmod 666 "$hiddev" 2>/dev/null || true
   fi
 
-  if [[ ! -f /etc/sudoers.d/omarchy-msi-center || ! -f /etc/udev/rules.d/60-msi-mysticlight.rules ]]; then
-    install -d -m 755 /etc/modules-load.d /etc/modprobe.d /etc/udev/rules.d /etc/sudoers.d "$SYS_STATE_DIR" 2>/dev/null || true
-    printf 'ec_sys\n' > /etc/modules-load.d/msi-center.conf 2>/dev/null || true
-    printf 'options ec_sys write_support=1\n' > /etc/modprobe.d/msi-center.conf 2>/dev/null || true
-    cat <<'EOF' > /etc/udev/rules.d/60-msi-mysticlight.rules 2>/dev/null || true
+  for p in \
+    /sys/devices/system/cpu/intel_pstate/no_turbo \
+    /sys/devices/system/cpu/cpufreq/boost \
+    /sys/devices/platform/msi-ec/shift_mode \
+    /sys/devices/platform/msi-ec/fan_mode \
+    /sys/devices/platform/msi-ec/cooler_boost \
+    /sys/devices/platform/msi-ec/super_battery \
+    /sys/devices/platform/msi-ec/webcam \
+    /sys/devices/platform/msi-ec/win_key \
+    /sys/devices/platform/msi-ec/usb_power \
+    /sys/devices/platform/msi-ec/kbd_backlight; do
+    if [[ -e "$p" ]]; then
+      chmod 666 "$p" 2>/dev/null || true
+    fi
+  done
+
+  for bat in /sys/class/power_supply/BAT*; do
+    if [[ -e "$bat/charge_control_end_threshold" ]]; then
+      chmod 666 "$bat/charge_control_end_threshold" 2>/dev/null || true
+    fi
+    if [[ -e "$bat/charge_control_start_threshold" ]]; then
+      chmod 666 "$bat/charge_control_start_threshold" 2>/dev/null || true
+    fi
+  done
+
+  install -d -m 755 /etc/modules-load.d /etc/modprobe.d /etc/udev/rules.d /etc/tmpfiles.d "$SYS_STATE_DIR" 2>/dev/null || true
+  printf 'ec_sys\n' > /etc/modules-load.d/msi-center.conf 2>/dev/null || true
+  printf 'options ec_sys write_support=1\n' > /etc/modprobe.d/msi-center.conf 2>/dev/null || true
+
+  cat <<'EOF' > /etc/udev/rules.d/60-msi-mysticlight.rules 2>/dev/null || true
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1462", ATTRS{idProduct}=="1603", MODE="0666"
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1462", ATTRS{idProduct}=="1562", MODE="0666"
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1462", ATTRS{idProduct}=="1563", MODE="0666"
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1462", ATTRS{idProduct}=="1564", MODE="0666"
 EOF
-    udevadm control --reload >/dev/null 2>&1 || true
-    udevadm trigger --subsystem-match=hidraw >/dev/null 2>&1 || true
-    [[ -n "$hiddev" ]] && chmod 666 "$hiddev" 2>/dev/null || true
 
-    local target_user="${SUDO_USER:-}"
-    if [[ -z "$target_user" && -n "${PKEXEC_UID:-}" ]]; then
-      target_user=$(id -un "$PKEXEC_UID" 2>/dev/null || true)
-    fi
-    [[ -z "$target_user" ]] && target_user=$(stat -c '%U' "$SCRIPT_PATH" 2>/dev/null || echo "")
+  cat <<'EOF' > /etc/tmpfiles.d/msi-center.conf 2>/dev/null || true
+z /sys/kernel/debug 0755 root root - -
+z /sys/kernel/debug/ec 0755 root root - -
+z /sys/kernel/debug/ec/ec0 0755 root root - -
+z /sys/kernel/debug/ec/ec0/io 0666 root root - -
+z /sys/devices/system/cpu/intel_pstate/no_turbo 0666 root root - -
+z /sys/devices/system/cpu/cpufreq/boost 0666 root root - -
+EOF
 
-    if [[ "$target_user" =~ ^[a-z_][a-z0-9_-]*$ && "$target_user" != "root" ]]; then
-      local sudoers_file="/etc/sudoers.d/omarchy-msi-center"
-      local uhome
-      uhome=$(getent passwd "$target_user" | cut -d: -f6)
-      printf '%s ALL=(root) NOPASSWD: %s\n' "$target_user" "$SCRIPT_PATH" > "$sudoers_file"
-      if [[ -n "$uhome" && "$SCRIPT_PATH" != "$uhome/.config/omarchy/plugins/oma.msi-center/bin/msi-center-ctl" ]]; then
-        printf '%s ALL=(root) NOPASSWD: %s/.config/omarchy/plugins/oma.msi-center/bin/msi-center-ctl\n' "$target_user" "$uhome" >> "$sudoers_file"
-      fi
-      chmod 440 "$sudoers_file"
-      if ! visudo -cf "$sudoers_file" >/dev/null 2>&1; then
-        rm -f "$sudoers_file"
-      fi
-    fi
-    write_state_kv "permissionsSetup" "true"
+  udevadm control --reload >/dev/null 2>&1 || true
+  udevadm trigger --subsystem-match=hidraw >/dev/null 2>&1 || true
+  if [[ -n "$hiddev" ]]; then
+    chmod 666 "$hiddev" 2>/dev/null || true
   fi
+  write_state_kv "permissionsSetup" "true"
 }
 
 ec_read_byte() {
@@ -218,6 +236,9 @@ PY
 
 ec_write_byte() {
   local offset_hex="$1" val_hex="$2"
+  if [[ ! -w "$EC_IO" ]]; then
+    ensure_ec_sys || return 1
+  fi
   is_msi_laptop_ec || return 1
   python3 - "$EC_IO" "$offset_hex" "$val_hex" <<'PY' 2>/dev/null
 import sys
@@ -230,6 +251,9 @@ PY
 
 ec_set_bit() {
   local offset_hex="$1" bit="$2" state="$3"
+  if [[ ! -w "$EC_IO" ]]; then
+    ensure_ec_sys || return 1
+  fi
   is_msi_laptop_ec || return 1
   python3 - "$EC_IO" "$offset_hex" "$bit" "$state" <<'PY' 2>/dev/null
 import sys
@@ -249,6 +273,9 @@ PY
 
 ec_set_mask() {
   local offset_hex="$1" mask_hex="$2" state="$3"
+  if [[ ! -w "$EC_IO" ]]; then
+    ensure_ec_sys || return 1
+  fi
   is_msi_laptop_ec || return 1
   python3 - "$EC_IO" "$offset_hex" "$mask_hex" "$state" <<'PY' 2>/dev/null
 import sys
@@ -267,9 +294,11 @@ PY
 }
 
 apply_cpu_boost_hw() {
-  local enable_boost="$1" # "1" = boost enabled, "0" = boost disabled
+  local enable_boost="$1"
   local no_turbo="0"
-  [[ "$enable_boost" == "0" ]] && no_turbo="1"
+  if [[ "$enable_boost" == "0" ]]; then
+    no_turbo="1"
+  fi
 
   if [[ -w /sys/devices/system/cpu/intel_pstate/no_turbo ]]; then
     echo "$no_turbo" > /sys/devices/system/cpu/intel_pstate/no_turbo 2>/dev/null || true
@@ -280,17 +309,23 @@ apply_cpu_boost_hw() {
 }
 
 stop_mystic_anim() {
-  local pid_file
-  for pid_file in "/tmp/msi-center-mystic.pid" "$USER_STATE_DIR/mystic-anim.pid"; do
-    if [[ -f "$pid_file" ]]; then
-      local pid
-      pid=$(cat "$pid_file" 2>/dev/null || true)
-      if [[ "$pid" =~ ^[0-9]+$ ]]; then
-        kill "$pid" 2>/dev/null || true
-      fi
-      rm -f "$pid_file" 2>/dev/null || true
-    fi
-  done
+  if [[ -f "$ANIM_PID_FILE" ]]; then
+    python3 - "$ANIM_PID_FILE" <<'PY' 2>/dev/null || true
+import os, signal, sys
+pid_file = sys.argv[1]
+try:
+    with open(pid_file, "r") as f:
+        pid = int(f.read().strip())
+    if pid > 1:
+        os.kill(pid, signal.SIGTERM)
+except Exception:
+    pass
+try:
+    os.remove(pid_file)
+except Exception:
+    pass
+PY
+  fi
 }
 
 apply_mystic_hw() {
@@ -321,15 +356,18 @@ apply_mystic_hw() {
 
   if [[ -w "$MSI_EC_DIR/kbd_backlight" ]]; then
     echo "$msi_ec_bl" > "$MSI_EC_DIR/kbd_backlight" 2>/dev/null || true
-  elif [[ $EUID -eq 0 ]]; then
+  elif [[ -w "$EC_IO" || $EUID -eq 0 ]]; then
     ec_write_byte 0xD3 "$ec_bl" || true
-    # Ensure keyboard backlight auto-off timer (0x2C) does not blank the LEDs
-    [[ "$ec_bl" != "0x80" ]] && ec_write_byte 0x2C 0x00 || true
+    if [[ "$ec_bl" != "0x80" ]]; then
+      ec_write_byte 0x2C 0x00 || true
+    fi
   fi
 
   # 2. Standard sysfs kbd_backlight if available
   for led in /sys/class/leds/*kbd_backlight*; do
-    [[ -d "$led" ]] || continue
+    if [[ ! -d "$led" ]]; then
+      continue
+    fi
     if [[ -w "$led/brightness" && -r "$led/max_brightness" ]]; then
       local maxb newb
       maxb=$(cat "$led/max_brightness" 2>/dev/null || echo 3)
@@ -337,7 +375,9 @@ apply_mystic_hw() {
         newb=0
       else
         newb=$(( (bright * maxb + 50) / 100 ))
-        (( newb < 1 )) && newb=1
+        if (( newb < 1 )); then
+          newb=1
+        fi
       fi
       echo "$newb" > "$led/brightness" 2>/dev/null || true
     fi
@@ -347,12 +387,10 @@ apply_mystic_hw() {
   done
 
   # 3. Direct HID feature report sequence for MSI MysticLight USB HID (1462:1603 / 1562 / 1563 / 1564)
-  # Note: MS-1603 requires byte 14 = 0x64 (100) whenever lit (0x00 when off),
-  # and scales backlight intensity via the R, G, B channel values (0..255).
   local hiddev
   hiddev=$(find_mystic_hidraw || true)
   if [[ -n "$hiddev" && -w "$hiddev" ]]; then
-    python3 - "$hiddev" "$mode" "$r" "$g" "$b" "$bright" "$speed" <<'PY'
+    python3 - "$hiddev" "$mode" "$r" "$g" "$b" "$bright" "$speed" "$ANIM_PID_FILE" <<'PY'
 import colorsys, fcntl, math, os, signal, sys, time
 
 dev = sys.argv[1]
@@ -362,10 +400,10 @@ g = max(0, min(255, int(sys.argv[4])))
 b = max(0, min(255, int(sys.argv[5])))
 bright = max(0, min(100, int(sys.argv[6])))
 speed = max(5, min(100, int(sys.argv[7])))
+pid_file = sys.argv[8]
 
 # HIDIOCSFEATURE(64) = 0xC0404806
 IOCTL_SET_FEATURE_64 = 0xC0004806 | (64 << 16)
-PID_FILE = "/tmp/msi-center-mystic.pid"
 
 # Map speed (5..100) to hardware transition byte (100..5, smaller = faster transition)
 transition_byte = max(4, min(100, 104 - speed))
@@ -376,7 +414,6 @@ def scale_rgb(cr, cg, cb, factor):
     sr = int(round(cr * f))
     sg = int(round(cg * f))
     sb = int(round(cb * f))
-    # Keep at least 1 unit on the dominant channel when factor > 0 and base color > 0
     if f > 0.0 and (cr > 0 or cg > 0 or cb > 0) and sr == 0 and sg == 0 and sb == 0:
         if cr >= cg and cr >= cb:
             sr = 1
@@ -421,7 +458,6 @@ def build_color_pkt(cr, cg, cb, active=True, transition=0x32, effect=0x08):
     buf[11] = cr & 0xFF
     buf[12] = cg & 0xFF
     buf[13] = cb & 0xFF
-    # MS-1603 requires 0x64 (100) here when lit, or 0x00 when off
     buf[14] = 0x64 if active else 0x00
     buf[15] = cr & 0xFF
     buf[16] = cg & 0xFF
@@ -456,7 +492,6 @@ finally:
     os.close(fd)
 
 # Spawn detached background animator for dynamic modes (breathing / wave)
-# Closing stdio ensures QML StdioCollector finishes immediately without blocking.
 pid = os.fork()
 if pid > 0:
     sys.exit(0)
@@ -474,9 +509,9 @@ if devnull > 2:
     os.close(devnull)
 
 try:
-    with open(PID_FILE, "w") as pf:
+    os.makedirs(os.path.dirname(pid_file), exist_ok=True)
+    with open(pid_file, "w") as pf:
         pf.write(str(os.getpid()))
-    os.chmod(PID_FILE, 0o666)
 except Exception:
     pass
 
@@ -491,13 +526,11 @@ signal.signal(signal.SIGINT, handle_stop)
 anim_fd = os.open(dev, os.O_RDWR | os.O_NONBLOCK)
 try:
     t0 = time.monotonic()
-    # Period in seconds: 4.0s at speed=5 -> 0.55s at speed=100
     period = max(0.55, 4.15 - 0.036 * speed)
     phase = 0.0
     while running:
-        # Check if another process replaced PID_FILE
         try:
-            with open(PID_FILE, "r") as pf:
+            with open(pid_file, "r") as pf:
                 if int(pf.read().strip()) != os.getpid():
                     break
         except Exception:
@@ -506,14 +539,12 @@ try:
         if mode == "breathing":
             elapsed = time.monotonic() - t0
             wave_val = 0.5 * (1.0 + math.cos(2.0 * math.pi * elapsed / period))
-            # Smooth gamma curve for natural LED breathing
             pulse = 0.04 + 0.96 * (wave_val ** 1.6)
             cr, cg, cb = scale_rgb(r, g, b, bright_scale * pulse)
             fcntl.ioctl(anim_fd, IOCTL_SET_FEATURE_64, build_global_prep())
             fcntl.ioctl(anim_fd, IOCTL_SET_FEATURE_64, build_color_pkt(cr, cg, cb, active=True, transition=transition_byte))
             time.sleep(0.045)
         elif mode == "wave":
-            # Advance rainbow phase proportional to speed
             step_hue = 0.006 + 0.075 * (speed / 100.0)
             phase = (phase - step_hue) % 1.0
             for z in range(24):
@@ -540,14 +571,15 @@ cmd_scenario() {
     *) echo "Invalid scenario: $sc" >&2; exit 1 ;;
   esac
 
+  ensure_permissions_bootstrap
+
   local pp="balanced"
-  # CONF_G2_10 (17T2EMS1 / Sword 17 HX): shift_mode @ 0xD2: turbo=0xC4, comfort=0xC1, eco=0xC2
   local shift_ec="0xC1"
-  # CONF_G2_10: fan_mode @ 0xD4: auto=0x0D, silent=0x1D, advanced=0x8D
   local fan_ec="0x0D"
   local fan_mode="auto"
   local super_bat="off"
   local enable_boost="1"
+  local turbo_str="true"
 
   case "$sc" in
     extreme)
@@ -557,6 +589,7 @@ cmd_scenario() {
       fan_mode="auto"
       super_bat="off"
       enable_boost="1"
+      turbo_str="true"
       ;;
     balanced)
       pp="balanced"
@@ -565,6 +598,7 @@ cmd_scenario() {
       fan_mode="auto"
       super_bat="off"
       enable_boost="1"
+      turbo_str="true"
       ;;
     silent)
       pp="balanced"
@@ -573,6 +607,7 @@ cmd_scenario() {
       fan_mode="silent"
       super_bat="off"
       enable_boost="1"
+      turbo_str="true"
       ;;
     super-battery)
       pp="power-saver"
@@ -581,54 +616,35 @@ cmd_scenario() {
       fan_mode="silent"
       super_bat="on"
       enable_boost="0"
+      turbo_str="false"
       ;;
   esac
 
-  if [[ $EUID -ne 0 ]]; then
-    if command -v powerprofilesctl >/dev/null 2>&1; then
-      powerprofilesctl set "$pp" 2>/dev/null || true
-    fi
-    if command -v omarchy-powerprofiles-set >/dev/null 2>&1; then
-      omarchy-powerprofiles-set autodetect "$pp" 2>/dev/null || true
-    fi
-    elevate_if_possible scenario "$sc"
-  fi
-
-  ensure_permissions_bootstrap
-
-  # Also set powerprofilesctl when invoked directly via pkexec
   if command -v powerprofilesctl >/dev/null 2>&1; then
     powerprofilesctl set "$pp" 2>/dev/null || true
   fi
-  if command -v omarchy-powerprofiles-set >/dev/null 2>&1 && [[ -n "${PKEXEC_UID:-${SUDO_UID:-}}" ]]; then
-    local target_uid="${PKEXEC_UID:-${SUDO_UID:-}}"
-    local target_user
-    target_user=$(id -un "$target_uid" 2>/dev/null || echo "")
-    if [[ -n "$target_user" ]]; then
-      sudo -u "$target_user" XDG_RUNTIME_DIR="/run/user/$target_uid" omarchy-powerprofiles-set autodetect "$pp" 2>/dev/null || true
-    fi
+  if command -v omarchy-powerprofiles-set >/dev/null 2>&1 && [[ $EUID -ne 0 ]]; then
+    omarchy-powerprofiles-set autodetect "$pp" 2>/dev/null || true
   fi
 
   write_state_kv "scenario" "$sc"
   write_state_kv "fanMode" "$fan_mode"
   write_state_kv "coolerBoost" "false"
-  write_state_kv "cpuTurbo" "$([[ "$enable_boost" == "1" ]] && echo "true" || echo "false")"
+  write_state_kv "cpuTurbo" "$turbo_str"
 
-  if [[ $EUID -eq 0 ]]; then
-    apply_cpu_boost_hw "$enable_boost"
-    if [[ -d "$MSI_EC_DIR" ]]; then
-      case "$sc" in
-        extreme) echo "turbo" > "$MSI_EC_DIR/shift_mode" 2>/dev/null || true; echo "auto" > "$MSI_EC_DIR/fan_mode" 2>/dev/null || true; echo "off" > "$MSI_EC_DIR/super_battery" 2>/dev/null || true; echo "off" > "$MSI_EC_DIR/cooler_boost" 2>/dev/null || true ;;
-        balanced) echo "comfort" > "$MSI_EC_DIR/shift_mode" 2>/dev/null || true; echo "auto" > "$MSI_EC_DIR/fan_mode" 2>/dev/null || true; echo "off" > "$MSI_EC_DIR/super_battery" 2>/dev/null || true; echo "off" > "$MSI_EC_DIR/cooler_boost" 2>/dev/null || true ;;
-        silent) echo "comfort" > "$MSI_EC_DIR/shift_mode" 2>/dev/null || true; echo "silent" > "$MSI_EC_DIR/fan_mode" 2>/dev/null || true; echo "off" > "$MSI_EC_DIR/super_battery" 2>/dev/null || true; echo "off" > "$MSI_EC_DIR/cooler_boost" 2>/dev/null || true ;;
-        super-battery) echo "eco" > "$MSI_EC_DIR/shift_mode" 2>/dev/null || true; echo "silent" > "$MSI_EC_DIR/fan_mode" 2>/dev/null || true; echo "on" > "$MSI_EC_DIR/super_battery" 2>/dev/null || true; echo "off" > "$MSI_EC_DIR/cooler_boost" 2>/dev/null || true ;;
-      esac
-    else
-      ec_set_bit 0x98 7 "off" || true
-      ec_write_byte 0xD2 "$shift_ec" || true
-      ec_write_byte 0xD4 "$fan_ec" || true
-      ec_set_mask 0xEB 0x0F "$super_bat" || true
-    fi
+  apply_cpu_boost_hw "$enable_boost"
+  if [[ -d "$MSI_EC_DIR" ]]; then
+    case "$sc" in
+      extreme) echo "turbo" > "$MSI_EC_DIR/shift_mode" 2>/dev/null || true; echo "auto" > "$MSI_EC_DIR/fan_mode" 2>/dev/null || true; echo "off" > "$MSI_EC_DIR/super_battery" 2>/dev/null || true; echo "off" > "$MSI_EC_DIR/cooler_boost" 2>/dev/null || true ;;
+      balanced) echo "comfort" > "$MSI_EC_DIR/shift_mode" 2>/dev/null || true; echo "auto" > "$MSI_EC_DIR/fan_mode" 2>/dev/null || true; echo "off" > "$MSI_EC_DIR/super_battery" 2>/dev/null || true; echo "off" > "$MSI_EC_DIR/cooler_boost" 2>/dev/null || true ;;
+      silent) echo "comfort" > "$MSI_EC_DIR/shift_mode" 2>/dev/null || true; echo "silent" > "$MSI_EC_DIR/fan_mode" 2>/dev/null || true; echo "off" > "$MSI_EC_DIR/super_battery" 2>/dev/null || true; echo "off" > "$MSI_EC_DIR/cooler_boost" 2>/dev/null || true ;;
+      super-battery) echo "eco" > "$MSI_EC_DIR/shift_mode" 2>/dev/null || true; echo "silent" > "$MSI_EC_DIR/fan_mode" 2>/dev/null || true; echo "on" > "$MSI_EC_DIR/super_battery" 2>/dev/null || true; echo "off" > "$MSI_EC_DIR/cooler_boost" 2>/dev/null || true ;;
+    esac
+  elif [[ -w "$EC_IO" || $EUID -eq 0 ]]; then
+    ec_set_bit 0x98 7 "off" || true
+    ec_write_byte 0xD2 "$shift_ec" || true
+    ec_write_byte 0xD4 "$fan_ec" || true
+    ec_set_mask 0xEB 0x0F "$super_bat" || true
   fi
 }
 
@@ -637,30 +653,37 @@ cmd_cooler_boost() {
   local cur
   cur=$(read_state_key "coolerBoost" "false")
   if [[ "$target" == "toggle" ]]; then
-    [[ "$cur" == "true" ]] && target="off" || target="on"
+    if [[ "$cur" == "true" ]]; then
+      target="off"
+    else
+      target="on"
+    fi
   fi
-  [[ "$target" == "on" || "$target" == "off" ]] || { echo "Expected on|off|toggle" >&2; exit 1; }
-
-  if [[ $EUID -ne 0 ]]; then
-    elevate_if_possible cooler-boost "$target"
+  if [[ "$target" != "on" && "$target" != "off" ]]; then
+    echo "Expected on|off|toggle" >&2
+    exit 1
   fi
 
   ensure_permissions_bootstrap
 
   local bool_val="false"
-  [[ "$target" == "on" ]] && bool_val="true"
+  if [[ "$target" == "on" ]]; then
+    bool_val="true"
+  fi
   write_state_kv "coolerBoost" "$bool_val"
   if [[ "$target" == "on" ]]; then
     write_state_kv "fanMode" "advanced"
   else
     local prev_fm
     prev_fm=$(read_state_key "fanMode" "auto")
-    [[ "$prev_fm" == "advanced" ]] && write_state_kv "fanMode" "auto"
+    if [[ "$prev_fm" == "advanced" ]]; then
+      write_state_kv "fanMode" "auto"
+    fi
   fi
 
   if [[ -w "$MSI_EC_DIR/cooler_boost" ]]; then
     echo "$target" > "$MSI_EC_DIR/cooler_boost" 2>/dev/null || true
-  elif [[ $EUID -eq 0 ]]; then
+  elif [[ -w "$EC_IO" || $EUID -eq 0 ]]; then
     ec_set_bit 0x98 7 "$target" || true
   fi
 }
@@ -672,10 +695,6 @@ cmd_fan_mode() {
     *) echo "Invalid fan mode: $mode" >&2; exit 1 ;;
   esac
 
-  if [[ $EUID -ne 0 ]]; then
-    elevate_if_possible fan-mode "$mode"
-  fi
-
   ensure_permissions_bootstrap
 
   write_state_kv "fanMode" "$mode"
@@ -686,7 +705,7 @@ cmd_fan_mode() {
     fi
     if [[ -w "$MSI_EC_DIR/cooler_boost" ]]; then
       echo "on" > "$MSI_EC_DIR/cooler_boost" 2>/dev/null || true
-    elif [[ $EUID -eq 0 ]]; then
+    elif [[ -w "$EC_IO" || $EUID -eq 0 ]]; then
       ec_write_byte 0xD4 0x8D || true
       ec_set_bit 0x98 7 "on" || true
     fi
@@ -697,7 +716,7 @@ cmd_fan_mode() {
     fi
     if [[ -w "$MSI_EC_DIR/fan_mode" ]]; then
       echo "$mode" > "$MSI_EC_DIR/fan_mode" 2>/dev/null || true
-    elif [[ $EUID -eq 0 ]]; then
+    elif [[ -w "$EC_IO" || $EUID -eq 0 ]]; then
       ec_set_bit 0x98 7 "off" || true
       if [[ "$mode" == "silent" ]]; then
         ec_write_byte 0xD4 0x1D || true
@@ -714,25 +733,36 @@ cmd_turbo() {
   if [[ -r /sys/devices/system/cpu/intel_pstate/no_turbo ]]; then
     local nt
     nt=$(cat /sys/devices/system/cpu/intel_pstate/no_turbo 2>/dev/null || echo "0")
-    [[ "$nt" == "1" ]] && cur_boost="0" || cur_boost="1"
+    if [[ "$nt" == "1" ]]; then
+      cur_boost="0"
+    else
+      cur_boost="1"
+    fi
   elif [[ -r /sys/devices/system/cpu/cpufreq/boost ]]; then
     cur_boost=$(cat /sys/devices/system/cpu/cpufreq/boost 2>/dev/null || echo "1")
   fi
 
   if [[ "$target" == "toggle" ]]; then
-    [[ "$cur_boost" == "1" ]] && target="off" || target="on"
+    if [[ "$cur_boost" == "1" ]]; then
+      target="off"
+    else
+      target="on"
+    fi
   fi
-  [[ "$target" == "on" || "$target" == "off" ]] || { echo "Expected on|off|toggle" >&2; exit 1; }
-
-  if [[ $EUID -ne 0 ]]; then
-    elevate_if_possible turbo "$target"
+  if [[ "$target" != "on" && "$target" != "off" ]]; then
+    echo "Expected on|off|toggle" >&2
+    exit 1
   fi
 
   ensure_permissions_bootstrap
 
   local enable_boost="1"
-  [[ "$target" == "off" ]] && enable_boost="0"
-  write_state_kv "cpuTurbo" "$([[ "$target" == "on" ]] && echo "true" || echo "false")"
+  local turbo_str="true"
+  if [[ "$target" == "off" ]]; then
+    enable_boost="0"
+    turbo_str="false"
+  fi
+  write_state_kv "cpuTurbo" "$turbo_str"
 
   apply_cpu_boost_hw "$enable_boost"
 }
@@ -750,17 +780,27 @@ cmd_mystic() {
     steady|breathing|wave|off) ;;
     *) echo "Invalid mystic mode: $mode" >&2; exit 1 ;;
   esac
-  [[ "$hex" =~ ^#?[0-9A-Fa-f]{6}$ ]] || hex="#FF1E1E"
-  [[ "$hex" != \#* ]] && hex="#$hex"
+  if [[ ! "$hex" =~ ^#?[0-9A-Fa-f]{6}$ ]]; then
+    hex="#FF1E1E"
+  fi
+  if [[ "$hex" != \#* ]]; then
+    hex="#$hex"
+  fi
   hex="${hex^^}"
-  [[ "$bright" =~ ^[0-9]+$ ]] || bright=100
-  (( bright > 100 )) && bright=100
-  [[ "$speed" =~ ^[0-9]+$ ]] || speed=50
-  (( speed < 5 )) && speed=5
-  (( speed > 100 )) && speed=100
-
-  if [[ $EUID -ne 0 ]]; then
-    elevate_if_possible mystic "$mode" "$hex" "$bright" "$speed"
+  if [[ ! "$bright" =~ ^[0-9]+$ ]]; then
+    bright=100
+  fi
+  if (( bright > 100 )); then
+    bright=100
+  fi
+  if [[ ! "$speed" =~ ^[0-9]+$ ]]; then
+    speed=50
+  fi
+  if (( speed < 5 )); then
+    speed=5
+  fi
+  if (( speed > 100 )); then
+    speed=100
   fi
 
   ensure_permissions_bootstrap
@@ -780,28 +820,30 @@ cmd_battery_limit() {
     *) echo "Invalid battery limit (expected 60, 80, or 100)" >&2; exit 1 ;;
   esac
 
-  if [[ $EUID -ne 0 ]]; then
-    elevate_if_possible battery-limit "$limit"
-  fi
-
   ensure_permissions_bootstrap
 
   write_state_kv "chargeLimit" "$limit"
   local start_limit=$(( limit - 10 ))
   for bat in /sys/class/power_supply/BAT*; do
-    [[ -d "$bat" ]] || continue
+    if [[ ! -d "$bat" ]]; then
+      continue
+    fi
     if [[ -w "$bat/charge_control_end_threshold" ]]; then
       if (( limit == 100 )); then
         echo 100 > "$bat/charge_control_end_threshold" 2>/dev/null || true
-        [[ -w "$bat/charge_control_start_threshold" ]] && echo "$start_limit" > "$bat/charge_control_start_threshold" 2>/dev/null || true
+        if [[ -w "$bat/charge_control_start_threshold" ]]; then
+          echo "$start_limit" > "$bat/charge_control_start_threshold" 2>/dev/null || true
+        fi
       else
-        [[ -w "$bat/charge_control_start_threshold" ]] && echo "$start_limit" > "$bat/charge_control_start_threshold" 2>/dev/null || true
+        if [[ -w "$bat/charge_control_start_threshold" ]]; then
+          echo "$start_limit" > "$bat/charge_control_start_threshold" 2>/dev/null || true
+        fi
         echo "$limit" > "$bat/charge_control_end_threshold" 2>/dev/null || true
       fi
     fi
   done
 
-  if [[ $EUID -eq 0 ]]; then
+  if [[ -w "$EC_IO" || $EUID -eq 0 ]]; then
     local ec_reg ec_val
     ec_reg=$(detect_battery_ec_reg)
     ec_val=$(printf '0x%02X' $(( 128 + limit )))
@@ -820,33 +862,41 @@ cmd_switch() {
   esac
 
   local cur_default="false"
-  [[ "$name" == "webcam" ]] && cur_default="true"
+  if [[ "$name" == "webcam" ]]; then
+    cur_default="true"
+  fi
   local cur
   cur=$(read_state_key "$state_key" "$cur_default")
   if [[ "$target" == "toggle" ]]; then
-    [[ "$cur" == "true" ]] && target="off" || target="on"
+    if [[ "$cur" == "true" ]]; then
+      target="off"
+    else
+      target="on"
+    fi
   fi
-  [[ "$target" == "on" || "$target" == "off" ]] || { echo "Expected on|off|toggle" >&2; exit 1; }
-
-  if [[ $EUID -ne 0 ]]; then
-    elevate_if_possible "$name" "$target"
+  if [[ "$target" != "on" && "$target" != "off" ]]; then
+    echo "Expected on|off|toggle" >&2
+    exit 1
   fi
 
   ensure_permissions_bootstrap
 
   local bool_val="false"
-  [[ "$target" == "on" ]] && bool_val="true"
+  if [[ "$target" == "on" ]]; then
+    bool_val="true"
+  fi
   write_state_kv "$state_key" "$bool_val"
 
   if [[ "$name" == "webcam" ]]; then
     if [[ -w "$MSI_EC_DIR/webcam" ]]; then
       echo "$target" > "$MSI_EC_DIR/webcam" 2>/dev/null || true
-    elif [[ $EUID -eq 0 ]]; then
-      # CONF_G2_10: webcam @ 0x2E bit 1 (1=on, 0=off), webcam_block @ 0x2F bit 1 (0=on, 1=off)
+    elif [[ -w "$EC_IO" || $EUID -eq 0 ]]; then
       if [[ "$target" == "on" ]]; then
         ec_set_bit 0x2E 1 "on" || true
         ec_set_bit 0x2F 1 "off" || true
-        modprobe uvcvideo 2>/dev/null || true
+        if [[ $EUID -eq 0 ]]; then
+          modprobe uvcvideo 2>/dev/null || true
+        fi
       else
         ec_set_bit 0x2E 1 "off" || true
         ec_set_bit 0x2F 1 "on" || true
@@ -854,22 +904,24 @@ cmd_switch() {
     fi
   elif [[ "$name" == "fn-swap" ]]; then
     if [[ -w "$MSI_EC_DIR/win_key" ]]; then
-      echo "$([[ "$target" == "on" ]] && echo "right" || echo "left")" > "$MSI_EC_DIR/win_key" 2>/dev/null || true
-    elif [[ $EUID -eq 0 ]]; then
-      # CONF_G2_10: fn_win_swap @ 0xE8 bit 4 (invert=true: bit 4 = 1 swaps Fn/Win)
+      if [[ "$target" == "on" ]]; then
+        echo "right" > "$MSI_EC_DIR/win_key" 2>/dev/null || true
+      else
+        echo "left" > "$MSI_EC_DIR/win_key" 2>/dev/null || true
+      fi
+    elif [[ -w "$EC_IO" || $EUID -eq 0 ]]; then
       ec_set_bit 0xE8 4 "$target" || true
     fi
   elif [[ "$name" == "usb-share" ]]; then
     if [[ -w "$MSI_EC_DIR/usb_power" ]]; then
       echo "$target" > "$MSI_EC_DIR/usb_power" 2>/dev/null || true
-    elif [[ $EUID -eq 0 ]]; then
+    elif [[ -w "$EC_IO" || $EUID -eq 0 ]]; then
       ec_set_bit 0xBF 5 "$target" || true
     fi
   fi
 }
 
 cmd_boot_init() {
-  [[ $EUID -eq 0 ]] || return 0
   ensure_permissions_bootstrap
   local saved_mode saved_color saved_bright saved_speed
   saved_mode=$(read_state_key "mysticMode" "")
@@ -879,32 +931,19 @@ cmd_boot_init() {
   if [[ -n "$saved_mode" ]]; then
     apply_mystic_hw "$saved_mode" "$saved_color" "$saved_bright" "$saved_speed" || true
   fi
-  touch "$BOOT_INIT_FLAG" 2>/dev/null || true
-  chmod 644 "$BOOT_INIT_FLAG" 2>/dev/null || true
 }
 
 cmd_setup_permissions() {
   if [[ $EUID -ne 0 ]]; then
-    if ! elevate_if_possible setup-permissions; then
-      echo "setup-permissions must be run as root (via pkexec)" >&2
-      exit 1
-    fi
+    echo "setup-permissions must be run as root (via pkexec)" >&2
+    exit 1
   fi
-  rm -f /etc/sudoers.d/omarchy-msi-center /etc/udev/rules.d/60-msi-mysticlight.rules 2>/dev/null || true
   ensure_permissions_bootstrap
   cmd_boot_init
   echo "Direct MSI hardware access enabled."
 }
 
 cmd_json() {
-  # After a reboot, automatically unlock /sys/kernel/debug/ec/ec0/io and restore
-  # Mystic Light state if passwordless sudo was already provisioned.
-  if [[ $EUID -ne 0 && ( ! -r "$EC_IO" || ! -f "$BOOT_INIT_FLAG" ) ]]; then
-    if [[ -f /etc/sudoers.d/omarchy-msi-center ]] && can_sudo_nopasswd; then
-      sudo -n "$SCRIPT_PATH" --boot-init >/dev/null 2>&1 || true
-    fi
-  fi
-
   python3 - "$STATE_FILE" "$SCRIPT_PATH" "$EC_IO" <<'PY'
 import glob, json, os, re, subprocess, sys
 
@@ -933,7 +972,6 @@ if os.path.isfile(state_file):
     except Exception:
         saved = {}
 
-# Read EC 256-byte snapshot if accessible
 ec_bytes = None
 if os.access(ec_io_path, os.R_OK):
     try:
@@ -979,7 +1017,6 @@ cpu_temp = 0.0
 mem_temp = 0.0
 nvme_temp = 0.0
 fans = {"fan1Rpm": 0, "fan2Rpm": 0, "fan3Rpm": 0, "fan4Rpm": 0}
-msi_wmi_hwmon = False
 
 for hw in sorted(glob.glob("/sys/class/hwmon/hwmon*")):
     name = read_file(os.path.join(hw, "name"), "")
@@ -1000,13 +1037,11 @@ for hw in sorted(glob.glob("/sys/class/hwmon/hwmon*")):
         if t > 0:
             nvme_temp = round(t / 1000.0, 1)
     elif name in ("msi_wmi_platform", "nct6775", "nct6687"):
-        msi_wmi_hwmon = True
         for idx in (1, 2, 3, 4):
             rpm = read_int(os.path.join(hw, f"fan{idx}_input"), 0)
             if rpm > 0 or fans[f"fan{idx}Rpm"] == 0:
                 fans[f"fan{idx}Rpm"] = rpm
 
-# Fallback to msi-ec fan speeds if hwmon did not report RPMs
 if fans["fan1Rpm"] == 0 and os.path.exists("/sys/devices/platform/msi-ec/cpu/realtime_fan_speed"):
     fans["fan1Rpm"] = read_int("/sys/devices/platform/msi-ec/cpu/realtime_fan_speed", 0)
 if fans["fan2Rpm"] == 0 and os.path.exists("/sys/devices/platform/msi-ec/gpu/realtime_fan_speed"):
@@ -1083,7 +1118,6 @@ try:
 except Exception:
     pass
 
-# Fallback to AMD Radeon sysfs telemetry if NVIDIA GPU not present
 if not gpu["present"]:
     for card_dev in sorted(glob.glob("/sys/class/drm/card[0-9]/device")):
         if read_file(os.path.join(card_dev, "vendor")) == "0x1002" and os.path.exists(os.path.join(card_dev, "gpu_busy_percent")):
@@ -1275,9 +1309,8 @@ has_audio_net = has_audio and len(net_parts) > 0
 audio_label = "SOF Audio" if ("snd_sof" in mods or "sof_audio_pci" in mods) else "HD Audio"
 audio_net_detail = " + ".join([audio_label] + net_parts) if has_audio_net else "Check audio/network modules"
 
-sudo_ready = (os.geteuid() == 0) or os.path.exists("/etc/sudoers.d/omarchy-msi-center")
-
-ec_backend = "msi-ec" if has_msi_ec else ("ec_sys (direct EC)" if (has_ec_sys and sudo_ready) else "msi_wmi_platform")
+ec_writable = os.access("/sys/devices/platform/msi-ec/cooler_boost", os.W_OK) or os.access(ec_io_path, os.W_OK)
+ec_backend = "msi-ec" if has_msi_ec else ("ec_sys (direct EC)" if ec_writable else "msi_wmi_platform")
 
 drivers = {
     "nvidiaOk": bool(gpu["present"] and (has_nvidia_mod or has_amd_gpu)),
@@ -1316,7 +1349,7 @@ hardware = {
     "webcamEnabled": webcam_enabled,
     "fnWinSwap": fn_win_swap,
     "usbPowerShare": usb_power_share,
-    "ecDirectReady": bool(sudo_ready and (has_msi_ec or has_ec_sys) and (mystic_hidraw_writable or not mystic_present)),
+    "ecDirectReady": bool(ec_writable and (mystic_hidraw_writable or not mystic_present)),
     "ecBackend": ec_backend
 }
 
@@ -1376,7 +1409,6 @@ case "${1:-json}" in
   usb-share) shift; cmd_switch usb-share "$@" ;;
   setup-permissions) cmd_setup_permissions ;;
   --boot-init) cmd_boot_init ;;
-  --check-root) exit 0 ;;
   *)
     echo "Usage: msi-center-ctl {json|status|scenario|cooler-boost|fan-mode|turbo|mystic|battery-limit|webcam|fn-swap|usb-share|setup-permissions}" >&2
     exit 1

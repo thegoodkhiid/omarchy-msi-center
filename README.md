@@ -32,15 +32,6 @@ Completely remove the plugin:
 omarchy plugin remove oma.msi-center
 ```
 
-*(Optional)* If you used the **Unlock Direct EC & RGB Control** button and want to remove the system udev/module/sudoers rules as well:
-
-```bash
-sudo rm -f /etc/sudoers.d/omarchy-msi-center \
-           /etc/udev/rules.d/60-msi-mysticlight.rules \
-           /etc/modules-load.d/msi-center.conf \
-           /etc/modprobe.d/msi-center.conf
-```
-
 ---
 
 ## Features
@@ -92,8 +83,8 @@ sudo rm -f /etc/sudoers.d/omarchy-msi-center \
   - **Show CPU/GPU Temp in Status Bar** — also toggled by **right-clicking** the MSI Center bar icon.
 - **GPU MUX & Display Outputs**:
   - Shows graphics routing mode (`Hybrid / Optimus` or `Discrete PCIe`), dGPU PCI runtime status, and connected display outputs (`eDP-1`, `HDMI-A-1`, `DP-1`, etc.).
-- **One-Click Polkit Setup**:
-  - Clicking **Unlock Direct EC & RGB Control** uses a one-time Polkit prompt to configure `ec_sys write_support=1` and `1462:*` `hidraw` udev rules so all future toggles are instant and passwordless.
+- **One-Click Hardware Access Setup**:
+  - Clicking **Unlock Direct EC & RGB Control** uses a one-time Polkit prompt to configure `ec_sys write_support=1`, `systemd-tmpfiles` permissions, and `1462:*` `hidraw` udev rules so all future toggles run directly as your user without password prompts.
 
 ---
 
@@ -116,16 +107,6 @@ omarchy-shell oma.msi-center coolerBoost
 omarchy-shell oma.msi-center toggleBarTemp
 ```
 
-Or use the bundled `msi-center-ctl` CLI directly:
-
-```bash
-~/.config/omarchy/plugins/oma.msi-center/bin/msi-center-ctl status
-~/.config/omarchy/plugins/oma.msi-center/bin/msi-center-ctl scenario extreme
-~/.config/omarchy/plugins/oma.msi-center/bin/msi-center-ctl cooler-boost toggle
-~/.config/omarchy/plugins/oma.msi-center/bin/msi-center-ctl mystic wave "#00E5FF" 100 65
-~/.config/omarchy/plugins/oma.msi-center/bin/msi-center-ctl battery-limit 80
-```
-
 ---
 
 ## Hardware Compatibility & Safety
@@ -136,18 +117,6 @@ Or use the bundled `msi-center-ctl` CLI directly:
 - **Safe EC Register Validation**:
   - Uses `/sys/devices/platform/msi-ec` whenever supported by the running kernel.
   - On newer 13th/14th-gen MSI laptops (such as `MS-17T2` / `17T2EMS1`) where `msi_wmi_platform` handles WMI and `ec_sys` handles EC registers, direct EC writes are strictly gated on verifying both a laptop chassis and a valid MSI `*EMS*` firmware signature at `0xA0..0xAB`.
-
----
-
-## Validation & Tests
-
-```bash
-# Validate Omarchy plugin manifest & structure
-omarchy plugin validate ~/.config/omarchy/plugins/oma.msi-center
-
-# Run state sanitization & markup-neutralization regression tests
-node ~/.config/omarchy/plugins/oma.msi-center/tests/model-test.js
-```
 
 ---
 
