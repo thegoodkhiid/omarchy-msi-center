@@ -2,6 +2,10 @@
 
 **MSI Center** is a native [Omarchy](https://omarchy.org/) status-bar plugin that brings complete hardware control, thermal telemetry, **User Scenarios**, **Cooler Boost**, **Mystic Light RGB**, and **Battery Master** charge limits to MSI laptops and desktops on Arch Linux.
 
+<p align="center">
+  <img src="preview.png" alt="MSI Center Preview" width="420">
+</p>
+
 ---
 
 ## Quick Install, Update & Removal
