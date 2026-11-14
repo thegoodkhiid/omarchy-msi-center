@@ -11,14 +11,18 @@ USER_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/msi-center"
 SYS_STATE_DIR="/var/lib/msi-center"
 MSI_EC_DIR="/sys/devices/platform/msi-ec"
 EC_IO="/sys/kernel/debug/ec/ec0/io"
-ANIM_PID_FILE="$USER_STATE_DIR/mystic-anim.pid"
 
-mkdir -p "$USER_STATE_DIR" 2>/dev/null || true
-
-STATE_FILE="$USER_STATE_DIR/state.json"
-if [[ -f "$SYS_STATE_DIR/state.json" ]]; then
-  if [[ ! -f "$STATE_FILE" || "$SYS_STATE_DIR/state.json" -nt "$STATE_FILE" ]]; then
-    STATE_FILE="$SYS_STATE_DIR/state.json"
+if [[ $EUID -eq 0 ]]; then
+  ANIM_PID_FILE="/run/msi-center-mystic.pid"
+  STATE_FILE="$SYS_STATE_DIR/state.json"
+else
+  mkdir -p "$USER_STATE_DIR" 2>/dev/null || true
+  ANIM_PID_FILE="$USER_STATE_DIR/mystic-anim.pid"
+  STATE_FILE="$USER_STATE_DIR/state.json"
+  if [[ -f "$SYS_STATE_DIR/state.json" ]]; then
+    if [[ ! -f "$STATE_FILE" || "$SYS_STATE_DIR/state.json" -nt "$STATE_FILE" ]]; then
+      STATE_FILE="$SYS_STATE_DIR/state.json"
+    fi
   fi
 fi
 
@@ -46,26 +50,13 @@ write_state_kv() {
   fi
   local updated
   updated=$(echo "$current" | jq --arg k "$key" --arg v "$val" '.[$k] = $v')
-  mkdir -p "$USER_STATE_DIR" 2>/dev/null || true
-  printf '%s\n' "$updated" > "$USER_STATE_DIR/state.json" 2>/dev/null || true
   if [[ $EUID -eq 0 ]]; then
-    mkdir -p "$SYS_STATE_DIR" 2>/dev/null || true
-    chmod 755 "$SYS_STATE_DIR" 2>/dev/null || true
+    install -d -m 755 -o root -g root "$SYS_STATE_DIR" 2>/dev/null || true
     printf '%s\n' "$updated" > "$SYS_STATE_DIR/state.json" 2>/dev/null || true
     chmod 644 "$SYS_STATE_DIR/state.json" 2>/dev/null || true
-    local target_uid="${PKEXEC_UID:-}"
-    if [[ -z "$target_uid" ]]; then
-      target_uid=$(stat -c '%u' "$SCRIPT_PATH" 2>/dev/null || echo "")
-    fi
-    if [[ -n "$target_uid" && "$target_uid" != "0" ]]; then
-      local uhome
-      uhome=$(getent passwd "$target_uid" | cut -d: -f6)
-      if [[ -n "$uhome" && -d "$uhome" ]]; then
-        mkdir -p "$uhome/.local/state/msi-center" 2>/dev/null || true
-        printf '%s\n' "$updated" > "$uhome/.local/state/msi-center/state.json" 2>/dev/null || true
-        chown -R "$target_uid:$target_uid" "$uhome/.local/state/msi-center" 2>/dev/null || true
-      fi
-    fi
+  else
+    mkdir -p "$USER_STATE_DIR" 2>/dev/null || true
+    printf '%s\n' "$updated" > "$USER_STATE_DIR/state.json" 2>/dev/null || true
   fi
 }
 
@@ -83,9 +74,6 @@ find_mystic_hidraw() {
 }
 
 ensure_ec_sys() {
-  if [[ -w "$EC_IO" ]]; then
-    return 0
-  fi
   if [[ $EUID -ne 0 ]]; then
     return 1
   fi
@@ -101,8 +89,6 @@ ensure_ec_sys() {
     fi
   fi
   if [[ -e "$EC_IO" ]]; then
-    chmod 755 /sys/kernel/debug /sys/kernel/debug/ec /sys/kernel/debug/ec/ec0 2>/dev/null || true
-    chmod 666 "$EC_IO" 2>/dev/null || true
     return 0
   fi
   return 1
@@ -122,13 +108,23 @@ is_msi_laptop_ec() {
   if [[ ! -r "$EC_IO" ]]; then
     ensure_ec_sys || return 1
   fi
-  python3 - "$EC_IO" <<'PY' 2>/dev/null
+  local fw
+  fw=$(python3 - "$EC_IO" <<'PY' 2>/dev/null || true
 import re, sys
 with open(sys.argv[1], "rb") as f:
     f.seek(0xA0)
     fw = f.read(12).decode("ascii", errors="ignore").strip("\x00 ")
-sys.exit(0 if re.match(r"^[0-9A-Z]{4}EMS[0-9]\.[0-9A-Z]{3}$", fw) else 1)
+if re.match(r"^[0-9A-Z]{4}EMS[0-9]\.[0-9A-Z]{3}$", fw):
+    print(fw)
+    sys.exit(0)
+sys.exit(1)
 PY
+)
+  if [[ -n "$fw" ]]; then
+    write_state_kv "ecFirmware" "$fw"
+    return 0
+  fi
+  return 1
 }
 
 # Detect whether battery charge control lives at 0xD7 (Gen-2 MSI EC) or 0xEF (Gen-1 MSI EC).
@@ -150,73 +146,6 @@ PY
   else
     echo "0xD7"
   fi
-}
-
-# Automatically provision udev + systemd-tmpfiles + ec_sys whenever executed as root
-# (via pkexec on first action) so subsequent actions run directly as the user.
-ensure_permissions_bootstrap() {
-  if [[ $EUID -ne 0 ]]; then
-    return 0
-  fi
-  ensure_ec_sys || true
-
-  local hiddev
-  hiddev=$(find_mystic_hidraw || true)
-  if [[ -n "$hiddev" ]]; then
-    chmod 666 "$hiddev" 2>/dev/null || true
-  fi
-
-  for p in \
-    /sys/devices/system/cpu/intel_pstate/no_turbo \
-    /sys/devices/system/cpu/cpufreq/boost \
-    /sys/devices/platform/msi-ec/shift_mode \
-    /sys/devices/platform/msi-ec/fan_mode \
-    /sys/devices/platform/msi-ec/cooler_boost \
-    /sys/devices/platform/msi-ec/super_battery \
-    /sys/devices/platform/msi-ec/webcam \
-    /sys/devices/platform/msi-ec/win_key \
-    /sys/devices/platform/msi-ec/usb_power \
-    /sys/devices/platform/msi-ec/kbd_backlight; do
-    if [[ -e "$p" ]]; then
-      chmod 666 "$p" 2>/dev/null || true
-    fi
-  done
-
-  for bat in /sys/class/power_supply/BAT*; do
-    if [[ -e "$bat/charge_control_end_threshold" ]]; then
-      chmod 666 "$bat/charge_control_end_threshold" 2>/dev/null || true
-    fi
-    if [[ -e "$bat/charge_control_start_threshold" ]]; then
-      chmod 666 "$bat/charge_control_start_threshold" 2>/dev/null || true
-    fi
-  done
-
-  install -d -m 755 /etc/modules-load.d /etc/modprobe.d /etc/udev/rules.d /etc/tmpfiles.d "$SYS_STATE_DIR" 2>/dev/null || true
-  printf 'ec_sys\n' > /etc/modules-load.d/msi-center.conf 2>/dev/null || true
-  printf 'options ec_sys write_support=1\n' > /etc/modprobe.d/msi-center.conf 2>/dev/null || true
-
-  cat <<'EOF' > /etc/udev/rules.d/60-msi-mysticlight.rules 2>/dev/null || true
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1462", ATTRS{idProduct}=="1603", MODE="0666"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1462", ATTRS{idProduct}=="1562", MODE="0666"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1462", ATTRS{idProduct}=="1563", MODE="0666"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1462", ATTRS{idProduct}=="1564", MODE="0666"
-EOF
-
-  cat <<'EOF' > /etc/tmpfiles.d/msi-center.conf 2>/dev/null || true
-z /sys/kernel/debug 0755 root root - -
-z /sys/kernel/debug/ec 0755 root root - -
-z /sys/kernel/debug/ec/ec0 0755 root root - -
-z /sys/kernel/debug/ec/ec0/io 0666 root root - -
-z /sys/devices/system/cpu/intel_pstate/no_turbo 0666 root root - -
-z /sys/devices/system/cpu/cpufreq/boost 0666 root root - -
-EOF
-
-  udevadm control --reload >/dev/null 2>&1 || true
-  udevadm trigger --subsystem-match=hidraw >/dev/null 2>&1 || true
-  if [[ -n "$hiddev" ]]; then
-    chmod 666 "$hiddev" 2>/dev/null || true
-  fi
-  write_state_kv "permissionsSetup" "true"
 }
 
 ec_read_byte() {
@@ -309,15 +238,20 @@ apply_cpu_boost_hw() {
 }
 
 stop_mystic_anim() {
-  if [[ -f "$ANIM_PID_FILE" ]]; then
-    python3 - "$ANIM_PID_FILE" <<'PY' 2>/dev/null || true
+  local pf
+  for pf in "$ANIM_PID_FILE" "/run/msi-center-mystic.pid" "$USER_STATE_DIR/mystic-anim.pid"; do
+    if [[ -f "$pf" ]]; then
+      python3 - "$pf" <<'PY' 2>/dev/null || true
 import os, signal, sys
 pid_file = sys.argv[1]
 try:
     with open(pid_file, "r") as f:
         pid = int(f.read().strip())
     if pid > 1:
-        os.kill(pid, signal.SIGTERM)
+        with open(f"/proc/{pid}/cmdline", "rb") as cf:
+            cmdline = cf.read().decode("utf-8", errors="ignore")
+        if "python" in cmdline:
+            os.kill(pid, signal.SIGTERM)
 except Exception:
     pass
 try:
@@ -325,7 +259,8 @@ try:
 except Exception:
     pass
 PY
-  fi
+    fi
+  done
 }
 
 apply_mystic_hw() {
@@ -571,8 +506,6 @@ cmd_scenario() {
     *) echo "Invalid scenario: $sc" >&2; exit 1 ;;
   esac
 
-  ensure_permissions_bootstrap
-
   local pp="balanced"
   local shift_ec="0xC1"
   local fan_ec="0x0D"
@@ -664,8 +597,6 @@ cmd_cooler_boost() {
     exit 1
   fi
 
-  ensure_permissions_bootstrap
-
   local bool_val="false"
   if [[ "$target" == "on" ]]; then
     bool_val="true"
@@ -694,8 +625,6 @@ cmd_fan_mode() {
     auto|silent|advanced) ;;
     *) echo "Invalid fan mode: $mode" >&2; exit 1 ;;
   esac
-
-  ensure_permissions_bootstrap
 
   write_state_kv "fanMode" "$mode"
   if [[ "$mode" == "advanced" ]]; then
@@ -754,8 +683,6 @@ cmd_turbo() {
     exit 1
   fi
 
-  ensure_permissions_bootstrap
-
   local enable_boost="1"
   local turbo_str="true"
   if [[ "$target" == "off" ]]; then
@@ -803,8 +730,6 @@ cmd_mystic() {
     speed=100
   fi
 
-  ensure_permissions_bootstrap
-
   write_state_kv "mysticMode" "$mode"
   write_state_kv "mysticColor" "$hex"
   write_state_kv "mysticBrightness" "$bright"
@@ -819,8 +744,6 @@ cmd_battery_limit() {
     60|80|100) ;;
     *) echo "Invalid battery limit (expected 60, 80, or 100)" >&2; exit 1 ;;
   esac
-
-  ensure_permissions_bootstrap
 
   write_state_kv "chargeLimit" "$limit"
   local start_limit=$(( limit - 10 ))
@@ -879,8 +802,6 @@ cmd_switch() {
     exit 1
   fi
 
-  ensure_permissions_bootstrap
-
   local bool_val="false"
   if [[ "$target" == "on" ]]; then
     bool_val="true"
@@ -919,28 +840,6 @@ cmd_switch() {
       ec_set_bit 0xBF 5 "$target" || true
     fi
   fi
-}
-
-cmd_boot_init() {
-  ensure_permissions_bootstrap
-  local saved_mode saved_color saved_bright saved_speed
-  saved_mode=$(read_state_key "mysticMode" "")
-  saved_color=$(read_state_key "mysticColor" "#00E5FF")
-  saved_bright=$(read_state_key "mysticBrightness" "100")
-  saved_speed=$(read_state_key "mysticSpeed" "50")
-  if [[ -n "$saved_mode" ]]; then
-    apply_mystic_hw "$saved_mode" "$saved_color" "$saved_bright" "$saved_speed" || true
-  fi
-}
-
-cmd_setup_permissions() {
-  if [[ $EUID -ne 0 ]]; then
-    echo "setup-permissions must be run as root (via pkexec)" >&2
-    exit 1
-  fi
-  ensure_permissions_bootstrap
-  cmd_boot_init
-  echo "Direct MSI hardware access enabled."
 }
 
 cmd_json() {
@@ -989,8 +888,8 @@ bios = read_file("/sys/devices/virtual/dmi/id/bios_version", "")
 chassis_type = read_int("/sys/devices/virtual/dmi/id/chassis_type", 10)
 chassis = "laptop" if chassis_type in (8, 9, 10, 11, 14, 30, 31, 32) else "desktop"
 
-ec_fw = "17T2EMS1.110" if board == "MS-17T2" else ""
-is_msi_ec_fw = False
+ec_fw = saved.get("ecFirmware", "") or ("17T2EMS1.110" if board == "MS-17T2" else "")
+is_msi_ec_fw = bool(re.match(r"^[0-9A-Z]{4}EMS[0-9]\.[0-9A-Z]{3}$", ec_fw))
 if ec_bytes:
     try:
         raw_fw = ec_bytes[0xA0:0xAC].decode("ascii", errors="ignore").strip("\x00 ")
@@ -1407,10 +1306,8 @@ case "${1:-json}" in
   webcam) shift; cmd_switch webcam "$@" ;;
   fn-swap) shift; cmd_switch fn-swap "$@" ;;
   usb-share) shift; cmd_switch usb-share "$@" ;;
-  setup-permissions) cmd_setup_permissions ;;
-  --boot-init) cmd_boot_init ;;
   *)
-    echo "Usage: msi-center-ctl {json|status|scenario|cooler-boost|fan-mode|turbo|mystic|battery-limit|webcam|fn-swap|usb-share|setup-permissions}" >&2
+    echo "Usage: msi-center-ctl {json|status|scenario|cooler-boost|fan-mode|turbo|mystic|battery-limit|webcam|fn-swap|usb-share}" >&2
     exit 1
     ;;
 esac

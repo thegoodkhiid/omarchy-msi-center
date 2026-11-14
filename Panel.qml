@@ -187,14 +187,6 @@ Panel {
     runCommand([switchName, next], label, true)
   }
 
-  function setupDirectPermissions() {
-    if (actionProc.running) return
-    errorText = ""
-    busyText = strings.t("status.applying").arg(strings.t("section.ecAccess"))
-    actionProc.command = ["pkexec", root.ctlScript, "setup-permissions"]
-    actionProc.running = true
-  }
-
   function toggleBarTemp() {
     root.settings = Object.assign({}, root.settings, { showBarTemp: !root.showBarTemp })
     if (root.bar && root.bar.shell) root.bar.shell.updateEntryInline(root.moduleName, root.settings)
@@ -965,34 +957,6 @@ Panel {
               var listStr = count > 0 ? root.state.gpu.displays.join(", ") : "—"
               return strings.tn("hw.displays", count).arg(root.fmtNum(count)).arg(listStr)
             }
-          }
-
-          PanelSeparator {
-            foreground: root.bar ? root.bar.foreground : Commons.Color.foreground
-          }
-
-          // Direct EC & RGB permission setup
-          Button {
-            width: parent.width
-            iconText: root.state.hardware.ecDirectReady ? "󰄬" : "󰌆"
-            text: root.safeText(
-              root.state.hardware.ecDirectReady
-                ? strings.t("ec.unlockedButton")
-                : strings.t("ec.unlockButton"),
-              48
-            )
-            tooltipText: root.safeText(
-              root.state.hardware.ecDirectReady
-                ? strings.t("ec.ready")
-                : strings.t("ec.unlockPrompt"),
-              96
-            )
-            fontSize: Style.font.bodySmall
-            foreground: root.bar ? root.bar.foreground : Commons.Color.foreground
-            fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
-            bordered: true
-            active: root.state.hardware.ecDirectReady
-            onClicked: root.setupDirectPermissions()
           }
         }
       }

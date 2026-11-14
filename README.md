@@ -83,8 +83,8 @@ omarchy plugin remove oma.msi-center
   - **Show CPU/GPU Temp in Status Bar** — also toggled by **right-clicking** the MSI Center bar icon.
 - **GPU MUX & Display Outputs**:
   - Shows graphics routing mode (`Hybrid / Optimus` or `Discrete PCIe`), dGPU PCI runtime status, and connected display outputs (`eDP-1`, `HDMI-A-1`, `DP-1`, etc.).
-- **One-Click Hardware Access Setup**:
-  - Clicking **Unlock Direct EC & RGB Control** uses a one-time Polkit prompt to configure `ec_sys write_support=1`, `systemd-tmpfiles` permissions, and `1462:*` `hidraw` udev rules so all future toggles run directly as your user without password prompts.
+- **Polkit-Gated Hardware Control**:
+  - Telemetry polling runs unprivileged. Privileged hardware actions invoke `bin/msi-center-ctl` via Polkit (`pkexec`), which validates the laptop chassis and MSI `*EMS*` EC firmware signature before performing bounded register writes without loosening `/sys/kernel/debug` or device permissions.
 
 ---
 
